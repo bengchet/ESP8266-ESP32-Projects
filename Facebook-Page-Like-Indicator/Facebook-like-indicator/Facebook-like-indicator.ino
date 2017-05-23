@@ -17,11 +17,12 @@
 #include <ArduinoJson.h>
 #include <Adafruit_NeoPixel.h>
 #include <Wire.h>
-//#include <EEPROM.h>
+#include <EEPROM.h>
 #include "SSD1306.h"
 #include "images.h"
 
 #define network_number 20
+#define access_token_len 162
 
 ESP8266WebServer *ESPertServer;
 int ESPertNumberOfNetworks = 0;
@@ -31,6 +32,7 @@ String ESPertContent="";
 String ESPertContentFooter="";
 String ESPertSSIDHeader="";
 String ESPertSSIDFooter="";
+String err_msg="";
 
 SSD1306 display(0x3c, SDA, SCL);
 
@@ -48,7 +50,10 @@ const char* host = "graph.facebook.com";
 const int httpsPort = 443;
 unsigned long likes_count;
 unsigned long current_count;
+unsigned int unread_messages = 0;
+unsigned int unseen_messages = 0;
 unsigned char flag = 0;
+String access_token = "EAARdSbE0ZB6MBAMd509eNUiGeek2f46i9vhq2IEPJQAseQ2CsjPDj4zVhkMJS3eEFHbEsNnIKEpEq9N5aTOz54AxGkLmrou3MPSTtuu1UWY8ZBqWDTj9HUmp9scDqVK43kcMmHzbrDZAb8vi4VLuHD04qJfJFYZD";
 
 // Use web browser to view and copy
 // SHA1 fingerprint of the certificate
@@ -617,7 +622,9 @@ unsigned long update(){
   }
   StaticJsonBuffer<200> jsonBuffer;
 
-  String url = "/v2.5/cytrontech?fields=likes&access_token=EAAICnyQvv40BAFWl9ZCJCT4AidZBMS1iTnPilsZCe0xLACippBisY7vZBDEiF0lWpTz5Mdg6CvvMQIjSne8ENKEPQtjIIFIfvSDpKUJDahdAGjaPSnPZCs5CkiXZB8f9beGKutr9QM4BGHr0jrPWEseIZAa0QRNOHwZD";
+  String url = "/v2.7/cytrontech?fields=unseen_message_count,unread_message_count,country_page_likes&access_token=";
+  url+=access_token;
+  
   Serial.print("requesting URL: ");
   Serial.println(url);
 
@@ -642,10 +649,16 @@ unsigned long update(){
     Serial.println("parseObject() failed");
     return 0;
   }
-  unsigned long likes = root["likes"];
+  unsigned long likes = root["country_page_likes"];
+  unread_messages = root["unread_message_count"];
+  unseen_messages = root["unseen_message_count"];
   String id = root["id"];
 
   Serial.print("Likes: ");Serial.println(likes);
+  Serial.println("==========");
+  Serial.print("Unseen message: ");Serial.println(unread_messages);
+  Serial.println("==========");
+  Serial.print("Unread message: ");Serial.println(unseen_messages);
   Serial.println("==========");
   Serial.print("ID: ");Serial.println(id);
   Serial.println("==========");
@@ -661,6 +674,52 @@ void scanNetworks(){
   if(ESPertNumberOfNetworks > network_number) ESPertNumberOfNetworks = network_number;
   for(int i = 0; i < ESPertNumberOfNetworks; ++i)
     ESPertNetworks[i] = WiFi.SSID(i);
+}
+
+String eeprom_read(int index, int length) {
+  String text = "";
+  char ch = 1;
+
+  for (int i = index; (i < (index + length)) && ch; ++i) {
+    if (ch = (char)EEPROM.read(i)) {
+      text.concat(ch);
+    }
+  }
+
+  return text;
+}
+
+int eeprom_write(int index, String text) {
+  for (int i = index; i < text.length() + index; ++i) {
+    EEPROM.write(i, text[i - index]);
+  }
+
+  EEPROM.write(index + text.length(), 0);
+  EEPROM.commit();
+
+  return text.length() + 1;
+}
+
+bool storeToken(String token){
+
+  int length = eeprom_write(10, token);
+  Serial.println(length);
+
+  //verify
+  String rcv = eeprom_read(10, length + 10);
+  if(rcv.equals(token)) return true;
+
+  return false;
+}
+
+String getToken(){
+  String rcv = eeprom_read(10, access_token_len+10);
+  //if(!rcv.equals("")) return rcv;
+
+  //in case it fails, try for another approach, retrieve token from thingspeak
+  //todo
+  return rcv;
+  
 }
 
 void initServer(){
@@ -687,6 +746,11 @@ void initServer(){
   ESPertContentHeader += String("    <meta name='viewport' content='width=device-width, initial-scale=1'>\r\n");
   ESPertContentHeader += String("  </head>\r\n");
   ESPertContentHeader += String("  <body>\r\n");
+  if(!err_msg.equals("")){
+     ESPertContentHeader += String("    <div style=\"color:red\" align=center>");
+     ESPertContentHeader += err_msg;
+     ESPertContentHeader += String("    </div>\r\n");
+  }
   ESPertContentHeader += String("    <div align=center>\r\n");
   ESPertContentHeader += String("      <form id='settings' name='settings' action='setting' method='POST'>\r\n");
   ESPertContentHeader += String("        <table cellspacing=0 cellpadding=2 style='border:thin solid black'>\r\n");
@@ -730,6 +794,7 @@ void initServer(){
 
     ESPertContent += ESPertSSIDFooter;
     ESPertContent += String("          <tr style='background-color:#cccccc'><td align=right>Password:</td><td><input type=text id=pass name=pass value='") + password + "'></td></tr>\r\n";
+    ESPertContent += String("          <tr style='background-color:#aaaaaa'><td align=right>Access Token:</td><td><input type=text id=token name=token value='") + access_token + "'></td></tr>\r\n";
     ESPertContent += String("          <tr><td colspan=2 align=center><input type=submit id=submitButton name=submitButton value='Submit'></td></tr>\r\n");
     ESPertContent += ESPertContentFooter;
     ESP.wdtFeed();
@@ -741,6 +806,14 @@ void initServer(){
     Serial.println("Setting done");
     ssid = ESPertServer->arg("ssid");
     password = ESPertServer->arg("pass");
+    String _token = ESPertServer->arg("token");
+
+    bool _token_success = true;
+    
+    if(!_token.equals("")){
+      _token_success = storeToken(_token);
+    }
+       
     ssid.replace("+", " ");
     ssid.replace("%40", "@");
 
@@ -754,7 +827,7 @@ void initServer(){
     ESPertContent += String("  </head>\r\n");
     ESPertContent += String("  <body>\r\n");
     
-    if (ssid.length() > 0) {
+    if (ssid.length() > 0 && _token_success) {
 
       WiFi.begin(ssid.c_str(), password.c_str());
       int c = 0;
@@ -778,7 +851,7 @@ void initServer(){
         ESP.reset();
     }
     else {
-      ESPertContent += "Invalid network, please enter the main page to setup again.";
+      ESPertContent += "Invalid network or save access token failure, please enter the main page to setup again.";
       ESPertContent += String("  </body>\r\n");
       ESPertContent += String("</html>\r\n");
       ESPertServer->send(200, "text/html", ESPertContent);
@@ -786,37 +859,17 @@ void initServer(){
   });
   ESPertServer->begin();
   Serial.println("HTTP server started");
+  uint32_t timeout = millis();
   while(1){
     ESPertServer->handleClient();
     if(flag)
       test();
-  }
-}
-/*
-String eeprom_read(int index, int length) {
-  String text = "";
-  char ch = 1;
-
-  for (int i = index; (i < (index + length)) && ch; ++i) {
-    if (ch = EEPROM.read(i)) {
-      text.concat(ch);
+    if(millis() - timeout > 600 * 1000){ // 600s = 10min, after that time auto reset
+      ESP.reset();
     }
   }
-
-  return text;
 }
 
-int eeprom_write(int index, String text) {
-  for (int i = index; i < text.length() + index; ++i) {
-    EEPROM.write(i, text[i - index]);
-  }
-
-  EEPROM.write(index + text.length(), 0);
-  EEPROM.commit();
-
-  return text.length() + 1;
-}
-*/
 bool longPress(){
   if(!digitalRead(13)){
     int i = 2000;
@@ -831,7 +884,7 @@ bool longPress(){
 
 void setup() {
 
-  //EEPROM.begin(512);
+  EEPROM.begin(512);
   pinMode(BTN, INPUT_PULLUP);
   WiFi.setAutoConnect(true);
   WiFi.mode(WIFI_STA);
@@ -850,21 +903,60 @@ void setup() {
   rainbowChessboxUp(1);
   chessboxUp(strip.Color(0, 0, 0), 1);
   chessboxDown(strip.Color(0, 0, 0), 1);
+
+  //retrieve latest 60 day token access_token from EEPROM
+  access_token = getToken();
+  if(access_token.equals("")){
+    err_msg = "Access token retrieval failed!";
+    initServer();
+  }
+  Serial.println(access_token);
   
   Serial.begin(115200);
   Serial.println();
   Serial.print("Connecting to ");
+
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+  display.setFont(ArialMT_Plain_16);
   
   //WiFi.begin(ssid, password);
-  int timeout = 15;
+  uint8_t timeout = 60; // wait for 30 seconds to connect to WiFi
   int _stat = WiFi.status();
-  while (_stat != WL_CONNECTED && timeout--) {
-    delay(500);
-    Serial.print(".");
+  uint8_t retry = 3;
+  bool isConnected = false;
+ 
+  while (retry && !isConnected) {
+    display.clear();
+    String str = "Retry=" + String(retry);
+    display.drawString(64, 10, "Connecting");
+    display.drawString(64, 38, str);
+    display.display();
+    String dot = "";
+    while(_stat != WL_CONNECTED && timeout--){
+      delay(500);
+      Serial.print(".");
+      if(timeout % 3 == 0)
+        dot += ".";
+      display.drawString(64, 20, dot);
+      display.display();
+      _stat = WiFi.status();
+    }
+    if(_stat == WL_CONNECTED){
+      isConnected = true;
+    }
+    else{ // reset timeout and retry
+      timeout = 60;
+    }
+
+    // try to reconnect to default WiFi for last retry
+    if(retry == 2)
+      WiFi.begin("Cytron", "f5f4f3f2f1");
     _stat = WiFi.status();
+    retry--;
   }
   
-  if(_stat != WL_CONNECTED){
+  if(!isConnected){
+    err_msg = "WiFi Connection failed!";
     initServer();
   }
   
@@ -876,13 +968,22 @@ void setup() {
   
 // Clear the local pixel buffer
   likes_count = update();
+
+  //becomes web server for configuration if parseObject failed or other failure
+  if(likes_count == 0){
+    err_msg = "Facebook connection or info retrieval failed!";
+    initServer();
+  }
   delay(1000); 
 
 }
 
 void loop() {
 
-  if(longPress()) initServer();
+  if(longPress()) {
+    err_msg = "Server set due to manual button press!";
+    initServer();
+  }
   if(flag) test();
   /*if(!digitalRead(BTN)){
     delay(500);
@@ -892,6 +993,20 @@ void loop() {
   current_count = update();
 
   if(current_count == 0) return;
+
+  if(unseen_messages > 0 || unread_messages > 0){
+    light(PIXEL_COUNT, strip.Color(0, 0, 0), 1);
+    chessboxUp(strip.Color(0, 0, 255), 10);
+    delay(1000);
+    light(PIXEL_COUNT, strip.Color(0, 0, 0), 1);
+    for(int i=0;i<3;i++){
+      yield();
+      light(BULB_PIXEL_COUNT, strip.Color(120, 30, 0), 5);
+      delay(1000);
+      light(BULB_PIXEL_COUNT, strip.Color(0, 0, 0), 5);
+      delay(1000);
+    }
+  }
 
   if(current_count > likes_count){
     //colorWipe(strip.Color(255, 69, 0), 1);
@@ -920,6 +1035,7 @@ void loop() {
   }
   int delay_time = 5000;
   while(delay_time--){
+    yield();
     if(flag) {
       test();
       break;
